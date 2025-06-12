@@ -373,17 +373,7 @@ DoStream:
 // convertTools converts from a list of langchaingo tools to a list of genai
 // tools.
 func convertTools(tools []llms.Tool) ([]*genai.Tool, error) {
-	if len(tools) == 0 {
-		return nil, nil
-	}
-
-	// Initialize a single genaiTool to hold all function declarations.
-	// This approach is used because the GoogleAI API expects a single tool
-	// with multiple function declarations, rather than multiple tools each with
-	// a single function declaration.
-	genaiTool := genai.Tool{
-		FunctionDeclarations: make([]*genai.FunctionDeclaration, 0, len(tools)),
-	}
+	genaiTools := make([]*genai.Tool, 0, len(tools))
 	for i, tool := range tools {
 		if tool.Type != "function" {
 			return nil, fmt.Errorf("tool [%d]: unsupported type %q, want 'function'", i, tool.Type)
@@ -425,19 +415,46 @@ func convertTools(tools []llms.Tool) ([]*genai.Tool, error) {
 			}
 			schema.Properties[propName] = &genai.Schema{}
 
-			if ty, ok := valueMap["type"]; ok {
-				tyString, ok := ty.(string)
-				if !ok {
-					return nil, fmt.Errorf("tool [%d]: expected string for type", i)
+			parseTypeAndDesc := func(m map[string]any) (typ genai.Type, desc string, err error) {
+				if ty, ok := m["type"]; ok {
+					tyString, ok := ty.(string)
+					if !ok {
+						return 0, "", fmt.Errorf("tool [%d]: expected string for type", i)
+					}
+					typ = convertToolSchemaType(tyString)
 				}
-				schema.Properties[propName].Type = convertToolSchemaType(tyString)
+
+				if descVal, ok := m["description"]; ok {
+					descString, ok := descVal.(string)
+					if !ok {
+						return 0, "", fmt.Errorf("tool [%d]: expected string for description", i)
+					}
+					desc = descString
+				}
+
+				return typ, desc, nil
 			}
-			if desc, ok := valueMap["description"]; ok {
-				descString, ok := desc.(string)
-				if !ok {
-					return nil, fmt.Errorf("tool [%d]: expected string for description", i)
+
+			typ, desc, err := parseTypeAndDesc(valueMap)
+			if err != nil {
+				return nil, err
+			}
+
+			schema.Properties[propName].Type = typ
+			schema.Properties[propName].Description = desc
+			
+			if typ == genai.TypeArray {
+				if items, ok := valueMap["items"].(map[string]any); ok {
+					elemType, elemDesc, err := parseTypeAndDesc(items)
+					if err != nil {
+						return nil, err
+					}
+					
+					schema.Properties[propName].Items = &genai.Schema{
+						Type: elemType,
+						Description: elemDesc,
+					}
 				}
-				schema.Properties[propName].Description = descString
 			}
 		}
 
@@ -460,10 +477,12 @@ func convertTools(tools []llms.Tool) ([]*genai.Tool, error) {
 		}
 		genaiFuncDecl.Parameters = schema
 
-		genaiTool.FunctionDeclarations = append(genaiTool.FunctionDeclarations, genaiFuncDecl)
+		genaiTools = append(genaiTools, &genai.Tool{
+			FunctionDeclarations: []*genai.FunctionDeclaration{genaiFuncDecl},
+		})
 	}
 
-	return []*genai.Tool{&genaiTool}, nil
+	return genaiTools, nil
 }
 
 // convertToolSchemaType converts a tool's schema type from its langchaingo
